@@ -246,6 +246,23 @@ type HistorySync struct {
 	Data *waHistorySync.HistorySync
 }
 
+// HistoricalPollVote is a single previously-bundled poll vote record
+// extracted from [HistorySync.Data]. SelectedOptionHashes are the
+// SHA-256(optionName) digests of the voter's selections, matching the
+// hashes emitted by live [Client.DecryptPollVote] calls so a consumer's
+// tallying path can be identical for live and historical votes.
+type HistoricalPollVote struct {
+	Chat                 types.JID
+	PollCreationID       types.MessageID
+	Voter                types.JID
+	SelectedOptionHashes [][]byte
+	Timestamp            time.Time
+	// Source poll-creation message info — useful when the consumer wants
+	// to map back to the WebMessageInfo (e.g. to verify the poll's own
+	// option list and resolve hashes back to option names).
+	PollCreationFromMe bool
+}
+
 type DecryptFailMode string
 
 const (
