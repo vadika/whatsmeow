@@ -87,6 +87,7 @@ var (
 	_ DownloadableMessage   = (*waE2E.StickerPackMessage)(nil)
 	_ DownloadableMessage   = (*waHistorySync.StickerMetadata)(nil)
 	_ DownloadableMessage   = (*waE2E.HistorySyncNotification)(nil)
+	_ DownloadableMessage   = (*waE2E.MessageHistoryBundle)(nil)
 	_ DownloadableMessage   = (*waServerSync.ExternalBlobReference)(nil)
 	_ DownloadableThumbnail = (*waE2E.ExtendedTextMessage)(nil)
 	_ DownloadableMessage   = (*types.StickerPackItem)(nil)
@@ -102,6 +103,7 @@ var classToMediaType = map[protoreflect.Name]MediaType{
 
 	"StickerPackMessage":      MediaStickerPack,
 	"HistorySyncNotification": MediaHistory,
+	"MessageHistoryBundle":    MediaHistory,
 	"ExternalBlobReference":   MediaAppState,
 }
 

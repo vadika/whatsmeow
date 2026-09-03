@@ -856,6 +856,7 @@ func (cli *Client) parseGroupCreate(parentNode, node *waBinary.Node) (*events.Jo
 	evt.Sender = pag.OptionalJID("participant")
 	evt.SenderPN = pag.OptionalJID("participant_pn")
 	evt.Notify = pag.OptionalString("notify")
+	evt.Timestamp = pag.OptionalUnixTime("t")
 	info, err := cli.parseGroupNode(&groupNode)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to parse group info in create notification: %w", err)

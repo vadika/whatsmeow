@@ -20,6 +20,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waArmadilloApplication"
 	"go.mau.fi/whatsmeow/proto/waConsumerApplication"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waGroupHistory"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waMsgApplication"
 	"go.mau.fi/whatsmeow/proto/waMsgTransport"
@@ -268,6 +269,23 @@ type HistorySync struct {
 	Data *waHistorySync.HistorySync
 }
 
+// GroupHistory is emitted after a message-history bundle shared with a newly
+// joined group member has been downloaded and decoded.
+type GroupHistory struct {
+	Info     types.MessageInfo
+	Data     *waGroupHistory.GroupHistory
+	Metadata *waE2E.MessageHistoryMetadata
+}
+
+// FullHistorySyncResponse is emitted when the primary device accepts or
+// rejects a FULL_HISTORY_SYNC_ON_DEMAND request. History payloads themselves
+// continue to arrive separately as HistorySync events.
+type FullHistorySyncResponse struct {
+	StanzaID     types.MessageID
+	RequestID    string
+	ResponseCode waE2E.PeerDataOperationRequestResponseMessage_PeerDataOperationResult_FullHistorySyncOnDemandResponseCode
+}
+
 type DecryptFailMode string
 
 const (
@@ -472,9 +490,10 @@ type JoinedGroup struct {
 	Type      string          // "new" if it's a newly created group.
 	CreateKey types.MessageID // If you created the group, this is the same message ID you passed to CreateGroup.
 	// For type new, the user who created the group and added you to it
-	Sender   *types.JID
-	SenderPN *types.JID
-	Notify   string
+	Sender    *types.JID
+	SenderPN  *types.JID
+	Notify    string
+	Timestamp time.Time // The time when this device joined or was added.
 
 	types.GroupInfo
 }

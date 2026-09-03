@@ -30,6 +30,7 @@ import (
 	"go.mau.fi/whatsmeow/appstate"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waGroupHistory"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waLidMigrationSyncPayload"
 	"go.mau.fi/whatsmeow/proto/waWeb"
@@ -790,6 +791,47 @@ func (cli *Client) DownloadHistorySync(ctx context.Context, notif *waE2E.History
 	return &historySync, nil
 }
 
+// DownloadGroupHistory downloads and decodes history shared with a member who
+// was newly added to a group.
+func (cli *Client) DownloadGroupHistory(ctx context.Context, bundle *waE2E.MessageHistoryBundle) (*waGroupHistory.GroupHistory, error) {
+	data, err := cli.Download(ctx, bundle)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download group history: %w", err)
+	}
+	return decodeGroupHistory(data)
+}
+
+func decodeGroupHistory(data []byte) (*waGroupHistory.GroupHistory, error) {
+	reader, err := zlib.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare group history decompression: %w", err)
+	}
+	defer reader.Close()
+	rawData, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress group history: %w", err)
+	}
+	var history waGroupHistory.GroupHistory
+	if err = proto.Unmarshal(rawData, &history); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal group history: %w", err)
+	}
+	return &history, nil
+}
+
+func (cli *Client) handleGroupHistoryBundle(ctx context.Context, info types.MessageInfo, bundle *waE2E.MessageHistoryBundle) {
+	history, err := cli.DownloadGroupHistory(ctx, bundle)
+	if err != nil {
+		cli.Log.Errorf("Failed to process group history bundle %s in %s: %v", info.ID, info.Chat, err)
+		return
+	}
+	cli.Log.Debugf("Received group history bundle in %s with %d messages", info.Chat, len(history.GetMessages()))
+	cli.dispatchEvent(&events.GroupHistory{
+		Info:     info,
+		Data:     history,
+		Metadata: bundle.GetMessageHistoryMetadata(),
+	})
+}
+
 func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.AppStateSyncKeyShare) {
 	onlyResyncIfNotSynced := true
 
@@ -883,6 +925,18 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
 			ok = cli.handlePlaceholderResendResponse(peerResp) && ok
 		case waE2E.PeerDataOperationRequestType_COMPANION_SYNCD_SNAPSHOT_FATAL_RECOVERY:
 			ok = cli.handleAppStateRecovery(ctx, peerResp.GetStanzaID(), peerResp.GetPeerDataOperationResult()) && ok
+		case waE2E.PeerDataOperationRequestType_FULL_HISTORY_SYNC_ON_DEMAND:
+			for _, result := range peerResp.GetPeerDataOperationResult() {
+				response := result.GetFullHistorySyncOnDemandRequestResponse()
+				if response == nil {
+					continue
+				}
+				ok = !cli.dispatchEvent(&events.FullHistorySyncResponse{
+					StanzaID:     types.MessageID(peerResp.GetStanzaID()),
+					RequestID:    response.GetRequestMetadata().GetRequestID(),
+					ResponseCode: response.GetResponseCode(),
+				}) && ok
+			}
 		}
 	}
 
@@ -1107,6 +1161,9 @@ func (cli *Client) handleDecryptedMessage(ctx context.Context, info *types.Messa
 	ok := cli.processProtocolParts(ctx, info, msg)
 	if !ok {
 		return false
+	}
+	if bundle := msg.GetMessageHistoryBundle(); bundle != nil {
+		go cli.handleGroupHistoryBundle(context.WithoutCancel(ctx), *info, bundle)
 	}
 	evt := &events.Message{Info: *info, RawMessage: msg, RetryCount: retryCount}
 	return cli.dispatchEvent(evt.UnwrapRaw())

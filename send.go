@@ -32,7 +32,9 @@ import (
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waAICommon"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -563,18 +565,63 @@ func (cli *Client) BuildUnavailableMessageRequest(chat, sender types.JID, id str
 // The response will contain to `count` messages immediately before the given message.
 // The recommended number of messages to request at a time is 50.
 func (cli *Client) BuildHistorySyncRequest(lastKnownMessageInfo *types.MessageInfo, count int) *waE2E.Message {
+	request := &waE2E.PeerDataOperationRequestMessage_HistorySyncOnDemandRequest{
+		ChatJID:               proto.String(lastKnownMessageInfo.Chat.String()),
+		OnDemandMsgCount:      proto.Int32(int32(count)),
+		SupportInlineResponse: proto.Bool(true),
+	}
+	// An empty anchor asks the primary for the newest messages in the chat.
+	// Keep the anchor fields absent in that case, matching WhatsApp Web.
+	if lastKnownMessageInfo.ID != "" {
+		request.OldestMsgID = proto.String(lastKnownMessageInfo.ID)
+		request.OldestMsgFromMe = proto.Bool(lastKnownMessageInfo.IsFromMe)
+		// Despite the historical field name, current primary clients expect
+		// milliseconds here. WhatsApp Web sends message.t * 1000.
+		request.OldestMsgTimestampMS = proto.Int64(lastKnownMessageInfo.Timestamp.UnixMilli())
+	}
 	return &waE2E.Message{
 		ProtocolMessage: &waE2E.ProtocolMessage{
 			Type: waE2E.ProtocolMessage_PEER_DATA_OPERATION_REQUEST_MESSAGE.Enum(),
 			PeerDataOperationRequestMessage: &waE2E.PeerDataOperationRequestMessage{
 				PeerDataOperationRequestType: waE2E.PeerDataOperationRequestType_HISTORY_SYNC_ON_DEMAND.Enum(),
-				HistorySyncOnDemandRequest: &waE2E.PeerDataOperationRequestMessage_HistorySyncOnDemandRequest{
-					ChatJID:          proto.String(lastKnownMessageInfo.Chat.String()),
-					OldestMsgID:      proto.String(lastKnownMessageInfo.ID),
-					OldestMsgFromMe:  proto.Bool(lastKnownMessageInfo.IsFromMe),
-					OnDemandMsgCount: proto.Int32(int32(count)),
-					// Despite the field name saying "MS", this is actually supposed to contain seconds
-					OldestMsgTimestampMS: proto.Int64(lastKnownMessageInfo.Timestamp.Unix()),
+				HistorySyncOnDemandRequest:   request,
+			},
+		},
+	}
+}
+
+// BuildFullHistorySyncRequest builds a request for recent history across all
+// chats from the user's primary device.
+//
+// This differs from [Client.BuildHistorySyncRequest], which only requests
+// messages before a known message in one chat. The response will come as one
+// or more *events.HistorySync events with type ON_DEMAND.
+//
+// historyFrom is the newest point in the requested range and durationDays is
+// the number of days before that point to include. The complete companion
+// history-sync configuration is included in the request. Omitting it causes
+// the primary device to fall back to a limited on-demand response on some
+// clients, which can leave messages consumed by another device out of a
+// reconnect catch-up.
+func (cli *Client) BuildFullHistorySyncRequest(historyFrom time.Time, durationDays uint32) *waE2E.Message {
+	var historySyncConfig *waCompanionReg.DeviceProps_HistorySyncConfig
+	if store.DeviceProps != nil && store.DeviceProps.HistorySyncConfig != nil {
+		historySyncConfig = proto.Clone(store.DeviceProps.HistorySyncConfig).(*waCompanionReg.DeviceProps_HistorySyncConfig)
+	}
+	return &waE2E.Message{
+		ProtocolMessage: &waE2E.ProtocolMessage{
+			Type: waE2E.ProtocolMessage_PEER_DATA_OPERATION_REQUEST_MESSAGE.Enum(),
+			PeerDataOperationRequestMessage: &waE2E.PeerDataOperationRequestMessage{
+				PeerDataOperationRequestType: waE2E.PeerDataOperationRequestType_FULL_HISTORY_SYNC_ON_DEMAND.Enum(),
+				FullHistorySyncOnDemandRequest: &waE2E.PeerDataOperationRequestMessage_FullHistorySyncOnDemandRequest{
+					RequestMetadata: &waE2E.FullHistorySyncOnDemandRequestMetadata{
+						RequestID: proto.String(hex.EncodeToString(random.Bytes(16))),
+					},
+					HistorySyncConfig: historySyncConfig,
+					FullHistorySyncOnDemandConfig: &waE2E.FullHistorySyncOnDemandConfig{
+						HistoryFromTimestamp: proto.Uint64(uint64(historyFrom.Unix())),
+						HistoryDurationDays:  proto.Uint32(durationDays),
+					},
 				},
 			},
 		},
@@ -1065,11 +1112,8 @@ func (cli *Client) preparePeerMessageNode(
 		"category": "peer",
 		"to":       to,
 	}
-	if message.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_APP_STATE_SYNC_KEY_REQUEST {
-		attrs["push_priority"] = "high"
-	} else if message.GetProtocolMessage().GetPeerDataOperationRequestMessage().GetPeerDataOperationRequestType() == waE2E.PeerDataOperationRequestType_HISTORY_SYNC_ON_DEMAND {
-		attrs["push_priority"] = "high_force"
-		attrs["privacy_sensitive"] = "1"
+	for key, value := range peerMessageDeliveryAttrs(message) {
+		attrs[key] = value
 	}
 	start := time.Now()
 	plaintext, err := proto.Marshal(message)
@@ -1107,6 +1151,22 @@ func (cli *Client) preparePeerMessageNode(
 		Attrs:   attrs,
 		Content: content,
 	}, nil
+}
+
+func peerMessageDeliveryAttrs(message *waE2E.Message) waBinary.Attrs {
+	attrs := waBinary.Attrs{}
+	protocolMessage := message.GetProtocolMessage()
+	if protocolMessage.GetType() == waE2E.ProtocolMessage_APP_STATE_SYNC_KEY_REQUEST {
+		attrs["push_priority"] = "high"
+		return attrs
+	}
+	requestType := protocolMessage.GetPeerDataOperationRequestMessage().GetPeerDataOperationRequestType()
+	if requestType == waE2E.PeerDataOperationRequestType_HISTORY_SYNC_ON_DEMAND ||
+		requestType == waE2E.PeerDataOperationRequestType_FULL_HISTORY_SYNC_ON_DEMAND {
+		attrs["push_priority"] = "high_force"
+		attrs["privacy_sensitive"] = "1"
+	}
+	return attrs
 }
 
 func (cli *Client) getMessageContent(
